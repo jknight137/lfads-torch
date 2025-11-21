@@ -74,7 +74,33 @@ class PoissonBPS(Poisson):
         )
         return (nll_model - nll_null) / (torch.log(torch.tensor(2)) * torch.mean(data))
 
+class SoftplusPoisson(Reconstruction):
+    def __init__(self):
+        # This module outputs one parameter per neuron before applying softplus.
+        self.n_params = 1
 
+    def reshape_output_params(self, output_params):
+        # Ensure that the parameter is of shape (…, 1)
+        return torch.unsqueeze(output_params, dim=-1)
+
+    def compute_loss(self, data, output_params):
+        # Apply softplus to obtain rates from raw network outputs.
+        # This guarantees nonnegative rates.
+        rate = F.softplus(output_params[..., 0])
+        
+        # When passing rates directly to poisson_nll_loss, we set log_input=False
+        return F.poisson_nll_loss(
+            rate,
+            data,
+            full=True,
+            reduction="none",
+            log_input=False
+        )
+
+    def compute_means(self, output_params):
+        # Return the computed rate after softplus activation.
+        return F.softplus(output_params[..., 0])
+    
 class MSE(nn.Module, Reconstruction):
     def __init__(self):
         super().__init__()

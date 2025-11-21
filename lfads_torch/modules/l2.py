@@ -2,11 +2,21 @@ import torch
 
 
 def compute_l2_penalty(lfads, hps):
-    recurrent_kernels_and_weights = [
-        (lfads.encoder.ic_enc.fwd_gru.cell.weight_hh, hps.l2_ic_enc_scale),
-        (lfads.encoder.ic_enc.bwd_gru.cell.weight_hh, hps.l2_ic_enc_scale),
-        (lfads.decoder.rnn.cell.gen_cell.weight_hh, hps.l2_gen_scale),
-    ]
+    if hps.gen_type == "gru":
+        recurrent_kernels_and_weights = [
+            (lfads.encoder.ic_enc.fwd_gru.cell.weight_hh, hps.l2_ic_enc_scale),
+            (lfads.encoder.ic_enc.bwd_gru.cell.weight_hh, hps.l2_ic_enc_scale),
+            (lfads.decoder.rnn.cell.gen_cell.weight_hh, hps.l2_gen_scale),
+        ]
+    elif hps.gen_type == "mlp":
+        recurrent_kernels_and_weights = [
+            (lfads.encoder.ic_enc.fwd_gru.cell.weight_hh, hps.l2_ic_enc_scale),
+            (lfads.encoder.ic_enc.bwd_gru.cell.weight_hh, hps.l2_ic_enc_scale),
+        ]
+        for param in lfads.decoder.rnn.cell.gen_cell.parameters():
+            recurrent_kernels_and_weights.append((param, hps.l2_gen_scale))
+        # for param in lfads.readout.parameters():
+        #     recurrent_kernels_and_weights.append((param, hps.l2_readout_scale))
     if lfads.use_con:
         recurrent_kernels_and_weights.extend(
             [

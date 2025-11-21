@@ -3,7 +3,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .initializers import init_linear_
-from .recurrent import ClippedGRUCell, MLPCell
+from .recurrent import ClippedGRUCell, MLPCell, ClippedNODE_DV_Cell
 
 
 class KernelNormalizedLinear(nn.Linear):
@@ -11,7 +11,10 @@ class KernelNormalizedLinear(nn.Linear):
         normed_weight = F.normalize(self.weight, p=2, dim=1)
         return F.linear(input, normed_weight, self.bias)
 
-
+class IdentityLinear(nn.Module):
+    def forward(self, input):
+        return input
+    
 class DecoderCell(nn.Module):
     def __init__(self, hparams):
         super().__init__()
@@ -25,12 +28,22 @@ class DecoderCell(nn.Module):
                 hps.ext_input_dim + hps.co_dim, hps.gen_dim, clip_value=hps.cell_clip
             )
         elif hps.gen_type == "mlp":
-            self.gen_cell = MLPCell(
-                hps.ext_input_dim + hps.co_dim, hps.gen_dim, hps.node_layers, hps.node_dim
+            self.gen_cell = ClippedNODE_DV_Cell(
+                input_size=hps.ext_input_dim + hps.co_dim,
+                latent_size=hps.gen_dim,
+                hidden_size=128,
+                num_layers=3,
             )
+            # self.gen_cell = MLPCell(
+            #     hps.ext_input_dim + hps.co_dim, hps.gen_dim, hps.node_layers, hps.node_dim
+            # )
         # Create the mapping from generator states to factors
-        self.fac_linear = KernelNormalizedLinear(hps.gen_dim, hps.fac_dim, bias=False)
-        init_linear_(self.fac_linear)
+        if hps.gen_type == "gru":
+            self.fac_linear = KernelNormalizedLinear(hps.gen_dim, hps.fac_dim, bias=False)
+            init_linear_(self.fac_linear)
+        elif hps.gen_type == "mlp":
+            self.fac_linear = IdentityLinear()
+            
         # Create the dropout layer
         self.dropout = nn.Dropout(hps.dropout_rate)
         # Decide whether to use the controller
@@ -90,7 +103,10 @@ class DecoderCell(nn.Module):
             gen_input = ext_input_step
         # compute and store the next
         gen_state = self.gen_cell(gen_input, gen_state)
-        gen_state_drop = self.dropout(gen_state)
+        if hps.gen_type == "gru":
+            gen_state_drop = self.dropout(gen_state)
+        elif hps.gen_type == "mlp":
+            gen_state_drop = gen_state  # No dropout for NODE-based generator
         factor = self.fac_linear(gen_state_drop)
 
         hidden = torch.cat(

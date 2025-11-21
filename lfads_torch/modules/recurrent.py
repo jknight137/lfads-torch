@@ -3,6 +3,41 @@ from torch import nn
 
 from .initializers import init_gru_cell_
 
+class ClippedNODE_DV_Cell(nn.Module):
+    def __init__(
+        self,
+        input_size: int,
+        latent_size: int,
+        hidden_size: int,
+        num_layers: int,
+        clip_value: float = float("inf"),
+    ):
+        super().__init__()
+        self.clip_value = clip_value
+        self.input_size = input_size
+        self.latent_size = latent_size
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        net = nn.Sequential()
+        net.add_module("linear_0", nn.Linear(input_size + latent_size, hidden_size))
+        net.add_module("relu_0", nn.ReLU())
+        for i in range(num_layers - 1):
+            net.add_module(f"linear_{i+1}", nn.Linear(hidden_size, hidden_size))
+            net.add_module(f"relu_{i+1}", nn.ReLU())
+        net.add_module("linear_out", nn.Linear(hidden_size, latent_size))
+        self.network = net
+        # TMP: For compatibility with `compute_l2_penalty`
+        self.weight_hh = torch.tensor(0.0, device="cuda")
+
+    def forward(self, input: torch.Tensor, hidden: torch.Tensor):
+        # concatenate input and hidden state
+        x = torch.cat([input, hidden], dim=1)
+        # pass through network
+        output = hidden + 0.1 * self.network(x)
+        # clamp output
+        output = torch.clamp(output, -self.clip_value, self.clip_value)
+        return output
+    
 class MLPCell(nn.Module):
     def __init__(
         self,
@@ -25,8 +60,6 @@ class MLPCell(nn.Module):
         #     nn.ReLU(),
         #     nn.Linear(128, hidden_size),
         # )
-        # TMP: For compatibility with `compute_l2_penalty`
-        self.weight_hh = torch.tensor(0.0, device="cuda")
 
     def forward(self, input: torch.Tensor, hidden: torch.Tensor):
         hidden_input = torch.cat([hidden, input], dim=1)
