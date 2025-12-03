@@ -239,3 +239,172 @@ class TestEval(pl.Callback):
             test_output.output_params[:, :esl, :edd],
         )
         pl_module.log("test/recon", test_recon)
+
+class MinSingularValueHistogram(pl.Callback):
+    """
+    Logs a histogram of minimum singular values of the readout Jacobian
+    ∂rates/∂z. Uses JVP for efficiency.
+    - Runs every `log_every_n_epochs`
+    - Uses one validation batch
+    - No graph construction (create_graph=False)
+    """
+    def __init__(
+        self,
+        sample_size=256,          # points in latent space
+        col_sample_size=0,        # 0 => use all dims (capped)
+        max_cols_cap=64,
+        neuron_sample_size=0,     # subsample rate dims
+        log_every_n_epochs=10,
+        eps=1e-12,
+    ):
+        super().__init__()
+        self.sample_size = sample_size
+        self.col_sample_size = col_sample_size
+        self.max_cols_cap = max_cols_cap
+        self.neuron_sample_size = neuron_sample_size
+        self.log_every_n_epochs = log_every_n_epochs
+        self.eps = eps
+    # ---------------- Utility funcs copied from loss class ---------------- #
+    @staticmethod
+    def _as_B1D(z):
+        return z.view(z.shape[0], 1, z.shape[1])
+    @staticmethod
+    def _pick_tensor(x):
+        if torch.is_tensor(x):
+            return x
+        if isinstance(x, dict):
+            for k in ("rate","rates","mean","means","log_rate","pre_rate","loc"):
+                if k in x and torch.is_tensor(x[k]):
+                    return x[k]
+            for v in x.values():
+                if torch.is_tensor(v):
+                    return v
+        if isinstance(x, (tuple,list)):
+            for v in x:
+                if torch.is_tensor(v):
+                    return v
+        raise RuntimeError("readout returned no tensor")
+    def _rates_from_z(self, model, z_flat):
+        Z = self._as_B1D(z_flat)
+        outp = model.readout[0](Z) # need to fix this for multi-session, right now takes the readout of the first session
+        params = self._pick_tensor(outp)
+        if self.apply_recon_means:
+            out = model.recon[0].compute_means(params.transpose(1,2))
+        else:
+            out = params
+        if out.dim()==3 and out.size(1)==1:
+            out = out[:,0,:]
+        return out.view(out.shape[0], -1)
+    def _choose_columns(self, D, device):
+        if self.col_sample_size > 0:
+            K = min(self.col_sample_size, D)
+            return torch.randperm(D, device=device)[:K]
+        # else use all (capped)
+        K = min(D, self.max_cols_cap)
+        if K < D:
+            return torch.randperm(D, device=device)[:K]
+        return torch.arange(D, device=device)
+    # ---------------- Singular value extraction ---------------- #
+    def _compute_min_svals_for_area(self, model, z):
+        """
+        Compute min singular value of J = d rates / d z for each sample.
+        """
+        S, D = z.shape
+        device = z.device
+        def F(inp):
+            return self._rates_from_z(model, inp)
+        z_req = z.clone().detach().requires_grad_(True)
+        rates0 = F(z_req)
+        # neuron subsampling
+        if (
+            self.neuron_sample_size > 0
+            and rates0.shape[1] > self.neuron_sample_size
+        ):
+            idxn = torch.randperm(rates0.shape[1], device=device)[:self.neuron_sample_size]
+        else:
+            idxn = None
+        # latent columns
+        idx_cols = self._choose_columns(D, device)
+        K = idx_cols.numel()
+        J_cols = []
+        for d in idx_cols.tolist():
+            v = torch.zeros_like(z_req)
+            v[:, d] = 1.0
+            _, jvp = torch.autograd.functional.jvp(
+                F, z_req, v, create_graph=False
+            )
+            if idxn is not None:
+                jvp = jvp[:, idxn]
+            J_cols.append(jvp)
+        # Stack: [S, Nsub, K]
+        J = torch.stack(J_cols, dim=-1)
+        min_svals = []
+        for sidx in range(S):
+            Js = J[sidx]   # [Nsub, K]
+            try:
+                svals = torch.linalg.svdvals(Js)
+            except RuntimeError:
+                svals = torch.linalg.svdvals(Js.cpu()).to(device)
+            min_svals.append(svals.min().item())
+        return min_svals
+    # ---------------- Lightning hook ---------------- #
+    def on_validation_epoch_end(self, trainer, pl_module):
+        epoch = trainer.current_epoch
+        if epoch % self.log_every_n_epochs != 0:
+            return
+        if getattr(trainer, "sanity_checking", False):
+            return
+        if not has_image_loggers(trainer.loggers):
+            return
+        pl_module.eval()
+        device = pl_module.device
+       
+        # We will collect min svs across TRAIN+VAL batches,
+        # exactly matching your working extraction code.
+        all_min_svals = []
+        pred_dls = trainer.datamodule.predict_dataloader()
+        dataloaders = {s: dls["valid"] for s, dls in pred_dls.items()}
+        # Loop over both loaders
+        for s, dataloader in dataloaders.items():
+            for batch in dataloader:
+                # Your exact format:
+                # Move data to the right device
+                batch = send_batch_to_device({s: batch}, pl_module.device)
+                # Perform the forward pass through the model
+                with torch.no_grad():
+                    output = pl_module.predict_step(batch, None, sample_posteriors=False)[s]
+                # Now grab latents 
+                Z = output.factors.detach()  # [B,T,D]
+                B, T, D = Z.shape
+                zflat = Z.reshape(B*T, D)
+                # Subsample to speed up
+                if zflat.shape[0] > self.sample_size:
+                    idx = torch.randperm(zflat.shape[0], device=device)[:self.sample_size]
+                    z = zflat[idx]
+                else:
+                    z = zflat
+                # Compute SVD(J)
+                min_svals = self._compute_min_svals_for_area(pl_module, z)
+                all_min_svals.extend(min_svals)
+        # ---------------------------------------------------------
+        # Plot aggregated histogram
+        # ---------------------------------------------------------
+        fig, ax = plt.subplots(1, 1, figsize=(8,5))
+        if len(all_min_svals) > 0:
+            ax.hist(
+                np.array(all_min_svals),
+                bins=40,
+                alpha=0.6,
+            )
+        ax.set_title(f"Min Singular Values at Epoch {epoch}")
+        ax.set_xlabel("Min singular value")
+        ax.set_ylabel("Count")
+        ax.legend()
+        fig.tight_layout()
+        log_figure(
+            trainer.loggers,
+            name=f"min_svals_histogram",
+            fig=fig,
+            step=trainer.global_step,
+        )
+        plt.close(fig)

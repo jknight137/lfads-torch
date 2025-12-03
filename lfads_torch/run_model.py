@@ -6,10 +6,11 @@ from pathlib import Path
 
 import hydra
 import pytorch_lightning as pl
-import torch
+import torch, pickle
 from hydra.utils import call, instantiate
 from omegaconf import OmegaConf, open_dict
 from ray import tune
+import torch.nn.utils.parametrize as parametrize
 
 from .utils import flatten
 
@@ -48,6 +49,7 @@ def run_model(
     overrides: dict = {},
     checkpoint_dir: str = None,
     config_path: str = "../configs/single.yaml",
+    save_path: str = None,
     do_train: bool = True,
     do_posterior_sample: bool = True,
 ):
@@ -89,6 +91,10 @@ def run_model(
             with open_dict(config):
                 config.logger.wandb_logger.name = tune.get_trial_name()
                 config.logger.wandb_logger.id = tune.get_trial_name()
+        elif "single" in str(config_path) and "wandb_logger" in config.logger:
+            with open_dict(config):
+                config.logger.wandb_logger.name = "neuralink"
+                config.logger.wandb_logger.id = "neuralink"
         # Instantiate the pytorch_lightning `Trainer` and its callbacks and loggers
         trainer = instantiate(
             config.trainer,
@@ -111,6 +117,40 @@ def run_model(
         if config.posterior_sampling.use_best_ckpt:
             ckpt_path = trainer.checkpoint_callback.best_model_path
             model.load_state_dict(torch.load(ckpt_path)["state_dict"])
+        
+        # save the model
+        if save_path is not None:
+            
+            def remove_all_parametrizations(model):
+                for module in model.modules():
+                    # Check for both possibilities
+                    param_attr = None
+                    if hasattr(module, "parametrizations"):
+                        param_attr = "parametrizations"
+                    elif hasattr(module, "_parametrizations"):
+                        param_attr = "_parametrizations"
+                    
+                    if param_attr is not None:
+                        param_dict = getattr(module, param_attr)
+                        if param_dict:
+                            for param_name in list(param_dict.keys()):
+                                print(f"Removing parametrization on {module} for parameter '{param_name}'")
+                                try:
+                                    parametrize.remove_parametrizations(module, param_name)
+                                except Exception as e:
+                                    print(f"Failed to remove parametrization {param_name} in {module}: {e}")
+
+
+
+            # Before saving, call:
+            remove_all_parametrizations(model)
+
+            model = model.to("cpu")
+            torch.save(model.state_dict(), os.path.join(save_path, "model_state_dict.pt"))
+            with open(os.path.join(save_path, 'model.pkl'), 'wb') as f:
+                pickle.dump(model, f)
+            with open(os.path.join(save_path, 'datamodule.pkl'), 'wb') as f:
+                pickle.dump(datamodule, f)
     else:
         if checkpoint_dir:
             # If not training, restore model from the checkpoint

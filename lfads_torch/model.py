@@ -10,7 +10,7 @@ from .modules.l2 import compute_l2_penalty
 from .modules.priors import Null
 from .tuples import SessionBatch, SessionOutput
 from .utils import transpose_lists
-
+from .modules.extra_losses import LossStack
 
 class LFADS(pl.LightningModule):
     def __init__(
@@ -43,6 +43,7 @@ class LFADS(pl.LightningModule):
         infer_aug_stack: augmentations.AugmentationStack,
         readin: nn.ModuleList,
         readout: nn.ModuleList,
+        loss_stack: LossStack,
         loss_scale: float,
         recon_reduce_mean: bool,
         lr_scheduler: bool,
@@ -67,7 +68,7 @@ class LFADS(pl.LightningModule):
     ):
         super().__init__()
         self.save_hyperparameters(
-            ignore=["ic_prior", "co_prior", "reconstruction", "readin", "readout"],
+            ignore=["ic_prior", "co_prior", "reconstruction", "readin", "readout", "loss_stack"],
         )
         # Store `co_prior` on `hparams` so it can be accessed in decoder
         self.hparams.co_prior = co_prior
@@ -88,6 +89,7 @@ class LFADS(pl.LightningModule):
         self.readout = readout
         # Create object to manage reconstruction
         self.recon = reconstruction
+        self.loss_stack = loss_stack
         # Store the trainable priors
         self.ic_prior = ic_prior
         self.co_prior = co_prior
@@ -261,8 +263,18 @@ class LFADS(pl.LightningModule):
         # Compute ramping coefficients
         l2_ramp = self._compute_ramp(hps.l2_start_epoch, hps.l2_increase_epoch)
         kl_ramp = self._compute_ramp(hps.kl_start_epoch, hps.kl_increase_epoch)
+
+        # Compute additional losses
+        additional_loss, additional_metrics = self.loss_stack.compute_losses(
+            model = self,
+            output=output,
+            batch=batch,
+            hps=hps,
+            device=self.device,
+        )
+
         # Compute the final loss
-        loss = hps.loss_scale * (recon + l2_ramp * l2 + kl_ramp * (ic_kl + co_kl))
+        loss = hps.loss_scale * (recon + l2_ramp * l2 + kl_ramp * (ic_kl + co_kl) + additional_loss)
         # Compute the reconstruction accuracy, if applicable
         if batch[0].truth.numel() > 0:
             output_means = [
@@ -315,6 +327,7 @@ class LFADS(pl.LightningModule):
                     "cur_epoch": float(self.current_epoch),
                 }
             )
+        metrics.update({f"{split}/{k}": v for k, v in additional_metrics.items()})
         # Log overall metrics
         self.log_dict(
             metrics,
