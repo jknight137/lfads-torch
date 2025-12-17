@@ -131,6 +131,7 @@ class _MultisessionModuleList(abc.ABC, nn.ModuleList):
         datafile_pattern: str,
         pcr_init: bool,
         requires_grad: bool,
+        module: str, # 'linear' or 'injective'
     ):
         modules = []
         # Identify paths that match the datafile pattern
@@ -140,12 +141,22 @@ class _MultisessionModuleList(abc.ABC, nn.ModuleList):
                 # Load the pre-computed transformations
                 state_dict = self._get_state_dict(data_path)
                 out_features, in_features = state_dict["weight"].shape
-                layer = nn.Linear(in_features, out_features)
-                layer.load_state_dict(state_dict)
+                if module == 'linear':
+                    layer = nn.Linear(in_features, out_features)
+                    layer.load_state_dict(state_dict)
+                else:
+                    ValueError('pcr_init only works with linear layer')
             else:
-                # Infer only the input dimension from the file
-                in_features, out_features = self._get_layer_shape(data_path)
-                layer = nn.Linear(in_features, out_features)
+                if module == 'linear':
+                    # Infer only the input dimension from the file
+                    in_features, out_features = self._get_layer_shape(data_path)
+                    layer = nn.Linear(in_features, out_features)
+                elif module == 'injective':
+                    in_features, out_features = self._get_layer_shape(data_path)
+                    layer = MultiCompartmentReadoutParametrized(
+                        data_path=data_path,
+                        in_features=in_features,
+                    )
             modules.append(layer)
         # Create the nn.ModuleList
         super().__init__(modules)
@@ -169,6 +180,7 @@ class MultisessionReadin(_MultisessionModuleList):
         out_features: int = None,
         pcr_init: bool = True,
         requires_grad: bool = False,
+        module: str = 'linear',
     ):
         assert (
             out_features is not None
@@ -178,6 +190,7 @@ class MultisessionReadin(_MultisessionModuleList):
             datafile_pattern=datafile_pattern,
             pcr_init=pcr_init,
             requires_grad=requires_grad,
+            module=module,
         )
 
     def _get_layer_shape(self, data_path):
@@ -200,6 +213,7 @@ class MultisessionReadout(_MultisessionModuleList):
         in_features: int = None,
         pcr_init: bool = True,
         requires_grad: bool = True,
+        module: str = 'linear',
     ):
         assert (
             in_features is not None
@@ -209,6 +223,7 @@ class MultisessionReadout(_MultisessionModuleList):
             datafile_pattern=datafile_pattern,
             pcr_init=pcr_init,
             requires_grad=requires_grad,
+            module=module,
         )
 
     def _get_layer_shape(self, data_path):

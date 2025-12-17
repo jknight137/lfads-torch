@@ -74,8 +74,9 @@ class PoissonBPS(Poisson):
         )
         return (nll_model - nll_null) / (torch.log(torch.tensor(2)) * torch.mean(data))
 
-class SoftplusPoisson(Reconstruction):
+class SoftplusPoisson(nn.Module, Reconstruction):
     def __init__(self):
+        super().__init__()
         # This module outputs one parameter per neuron before applying softplus.
         self.n_params = 1
 

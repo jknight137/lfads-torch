@@ -44,6 +44,7 @@ class LFADS(pl.LightningModule):
         readin: nn.ModuleList,
         readout: nn.ModuleList,
         loss_stack: LossStack,
+        minSV_scale: float,
         loss_scale: float,
         recon_reduce_mean: bool,
         lr_scheduler: bool,
@@ -265,16 +266,18 @@ class LFADS(pl.LightningModule):
         kl_ramp = self._compute_ramp(hps.kl_start_epoch, hps.kl_increase_epoch)
 
         # Compute additional losses
-        additional_loss, additional_metrics = self.loss_stack.compute_losses(
-            model = self,
-            output=output,
-            batch=batch,
+        additional_loss, additional_metrics = zip(*[self.loss_stack.compute_losses(
+            readout = self.readout[s],
+            recon = self.recon[s],
+            output=output[s],
+            batch=batch[s],
             hps=hps,
             device=self.device,
-        )
+        ) for s in sessions])
+        additional_loss = torch.mean(torch.stack(additional_loss))
 
         # Compute the final loss
-        loss = hps.loss_scale * (recon + l2_ramp * l2 + kl_ramp * (ic_kl + co_kl) + additional_loss)
+        loss = hps.loss_scale * (recon + l2_ramp * l2 + kl_ramp * (ic_kl + co_kl) + hps.minSV_scale * additional_loss)
         # Compute the reconstruction accuracy, if applicable
         if batch[0].truth.numel() > 0:
             output_means = [
@@ -305,6 +308,7 @@ class LFADS(pl.LightningModule):
         metrics = {
             f"{split}/loss": loss,
             f"{split}/recon": recon,
+            f"{split}/additional_loss": additional_loss,
             f"{split}/bps": max(bps, -1.0),
             f"{split}/co_bps": max(co_bps, -1.0),
             f"{split}/fp_bps": max(fp_bps, -1.0),
@@ -327,7 +331,8 @@ class LFADS(pl.LightningModule):
                     "cur_epoch": float(self.current_epoch),
                 }
             )
-        metrics.update({f"{split}/{k}": v for k, v in additional_metrics.items()})
+        # metrics.update({f"{split}/{k}": v for k, v in additional_metrics.items()})
+        metrics.update({f"{split}/sess{s}/{k}": v for s in sessions for k, v in additional_metrics[s].items()})
         # Log overall metrics
         self.log_dict(
             metrics,
