@@ -26,6 +26,7 @@ def run_model(
     config_path: str = "../configs/single.yaml",
     do_train: bool = True,
     do_posterior_sample: bool = True,
+    extra_callbacks=None,
 ):
     """Adds overrides to the default config, instantiates all PyTorch Lightning
     objects from config, and runs the training pipeline.
@@ -66,9 +67,13 @@ def run_model(
                 config.logger.wandb_logger.name = tune.get_trial_name()
                 config.logger.wandb_logger.id = tune.get_trial_name()
         # Instantiate the pytorch_lightning `Trainer` and its callbacks and loggers
+        callbacks = [instantiate(c) for c in config.callbacks.values()]
+        if extra_callbacks:
+            callbacks.extend(extra_callbacks)
+
         trainer = instantiate(
             config.trainer,
-            callbacks=[instantiate(c) for c in config.callbacks.values()],
+            callbacks=callbacks,
             logger=[instantiate(lg) for lg in config.logger.values()],
             gpus=int(torch.cuda.is_available()),
         )
